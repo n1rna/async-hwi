@@ -8,6 +8,7 @@ use bitcoin::{
     bip32::{DerivationPath, Fingerprint, Xpub},
     psbt::Psbt,
 };
+use hidapi::DeviceInfo;
 
 use crate::{parse_version, AddressScript, DeviceKind, Error as HWIError, Version, HWI};
 pub use coldcard as api;
@@ -166,4 +167,8 @@ impl From<Coldcard> for Arc<dyn HWI + Sync + Send> {
     fn from(s: Coldcard) -> Arc<dyn HWI + Sync + Send> {
         Arc::new(s)
     }
+}
+
+pub fn is_coldcard(device_info: &DeviceInfo) -> bool {
+    device_info.vendor_id() == api::COINKITE_VID && device_info.product_id() == api::CKCC_PID
 }

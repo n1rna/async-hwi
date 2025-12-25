@@ -7,6 +7,8 @@ pub mod coldcard;
 pub mod jade;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+#[cfg(feature = "service")]
+pub mod service;
 #[cfg(feature = "specter")]
 pub mod specter;
 pub mod utils;
