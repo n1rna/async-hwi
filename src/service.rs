@@ -6,6 +6,7 @@
 use std::{
     collections::BTreeMap,
     fmt::Debug,
+    marker::PhantomData,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -80,9 +81,10 @@ impl Debug for LockedDevice {
 }
 
 #[derive(Debug, Clone)]
-pub struct SupportedDevice<Message>
+pub struct SupportedDevice<Message, Id = ()>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     id: String,
     device: Arc<dyn HWI + Sync + Send>,
@@ -91,11 +93,13 @@ where
     version: Option<Version>,
     rt: tokio::runtime::Handle,
     sender: channel::Sender<Message>,
+    _phantom: PhantomData<Id>,
 }
 
-impl<Message> SupportedDevice<Message>
+impl<Message, Id> SupportedDevice<Message, Id>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     pub fn device(&self) -> &Arc<dyn HWI + Sync + Send> {
         &self.device
@@ -113,7 +117,7 @@ where
         &self.kind
     }
 
-    pub fn get_extended_pubkey(&self, path: &DerivationPath) {
+    pub fn get_extended_pubkey(&self, id: Id, path: &DerivationPath) {
         let path = path.clone();
         let sender = self.sender.clone();
         let fg = self.fingerprint;
@@ -131,17 +135,17 @@ where
                         fg,
                         xpub
                     );
-                    let _ = sender.send(SigningDeviceMsg::XPub(fg, path, xpub).into());
+                    let _ = sender.send(SigningDeviceMsg::XPub(id, fg, path, xpub).into());
                 }
                 Err(e) => {
                     tracing::debug!("SupportedDevice[{}]::get_extended_pubkey: error={}", fg, e);
-                    let _ = sender.send(SigningDeviceMsg::Error(e.to_string()).into());
+                    let _ = sender.send(SigningDeviceMsg::Error(Some(id), e.to_string()).into());
                 }
             }
         });
     }
 
-    pub fn register_wallet(&self, name: &str, policy: &str) {
+    pub fn register_wallet(&self, id: Id, name: &str, policy: &str) {
         let name = name.to_string();
         let policy = policy.to_string();
         let sender = self.sender.clone();
@@ -161,17 +165,18 @@ where
                         fg,
                         hmac
                     );
-                    let _ = sender.send(SigningDeviceMsg::WalletRegistered(fg, name, hmac).into());
+                    let _ =
+                        sender.send(SigningDeviceMsg::WalletRegistered(id, fg, name, hmac).into());
                 }
                 Err(e) => {
                     tracing::debug!("SupportedDevice[{}]::register_wallet: error={}", fg, e);
-                    let _ = sender.send(SigningDeviceMsg::Error(e.to_string()).into());
+                    let _ = sender.send(SigningDeviceMsg::Error(Some(id), e.to_string()).into());
                 }
             }
         });
     }
 
-    pub fn is_wallet_registered(&self, name: &str, policy: &str) {
+    pub fn is_wallet_registered(&self, id: Id, name: &str, policy: &str) {
         let name = name.to_string();
         let policy = policy.to_string();
         let sender = self.sender.clone();
@@ -191,18 +196,19 @@ where
                         fg,
                         registered
                     );
-                    let _ = sender
-                        .send(SigningDeviceMsg::WalletIsRegistered(fg, name, registered).into());
+                    let _ = sender.send(
+                        SigningDeviceMsg::WalletIsRegistered(id, fg, name, registered).into(),
+                    );
                 }
                 Err(e) => {
                     tracing::debug!("SupportedDevice[{}]::is_wallet_registered: error={}", fg, e);
-                    let _ = sender.send(SigningDeviceMsg::Error(e.to_string()).into());
+                    let _ = sender.send(SigningDeviceMsg::Error(Some(id), e.to_string()).into());
                 }
             }
         });
     }
 
-    pub fn display_address(&self, script: &AddressScript) {
+    pub fn display_address(&self, id: Id, script: &AddressScript) {
         let script = script.clone();
         let sender = self.sender.clone();
         let fg = self.fingerprint;
@@ -216,17 +222,18 @@ where
             match (*device).display_address(&script).await {
                 Ok(()) => {
                     tracing::debug!("SupportedDevice[{}]::display_address: success", fg);
-                    let _ = sender.send(SigningDeviceMsg::AddressDisplayed(fg, script).into());
+                    let _ = sender.send(SigningDeviceMsg::AddressDisplayed(id, fg, script).into());
                 }
                 Err(e) => {
                     tracing::debug!("SupportedDevice[{}]::display_address: error={}", fg, e);
-                    let _ = sender.send(SigningDeviceMsg::Error(e.to_string()).into());
+                    let _ = sender.send(SigningDeviceMsg::Error(Some(id), e.to_string()).into());
                 }
             }
         });
     }
 
-    pub fn sign_tx(&self, mut tx: Psbt) {
+    pub fn sign_tx(&self, id: Id, tx: Psbt) {
+        let mut tx = tx;
         let sender = self.sender.clone();
         let fg = self.fingerprint;
         let device = self.device.clone();
@@ -235,11 +242,11 @@ where
             match (*device).sign_tx(&mut tx).await {
                 Ok(()) => {
                     tracing::debug!("SupportedDevice[{}]::sign_tx: success", fg);
-                    let _ = sender.send(SigningDeviceMsg::TransactionSigned(fg, tx).into());
+                    let _ = sender.send(SigningDeviceMsg::TransactionSigned(id, fg, tx).into());
                 }
                 Err(e) => {
                     tracing::debug!("SupportedDevice[{}]::sign_tx: error={}", fg, e);
-                    let _ = sender.send(SigningDeviceMsg::Error(e.to_string()).into());
+                    let _ = sender.send(SigningDeviceMsg::Error(Some(id), e.to_string()).into());
                 }
             }
         });
@@ -247,9 +254,10 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub enum SigningDevice<Message>
+pub enum SigningDevice<Message, Id = ()>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     Unsupported {
         id: String,
@@ -265,12 +273,13 @@ where
         pairing_code: Option<String>,
         kind: DeviceKind,
     },
-    Supported(SupportedDevice<Message>),
+    Supported(SupportedDevice<Message, Id>),
 }
 
-impl<Message> SigningDevice<Message>
+impl<Message, Id> SigningDevice<Message, Id>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     async fn new(
         id: String,
@@ -289,6 +298,7 @@ where
             version,
             rt,
             sender,
+            _phantom: PhantomData,
         }))
     }
 
@@ -322,7 +332,7 @@ where
         matches!(self, Self::Supported { .. })
     }
 
-    pub fn clone_locked(&self) -> Option<SigningDevice<Message>> {
+    pub fn clone_locked(&self) -> Option<SigningDevice<Message, Id>> {
         if let SigningDevice::Locked {
             id,
             device,
@@ -361,31 +371,33 @@ impl SigningDeviceConfig {
 }
 
 #[derive(Debug, Clone)]
-pub enum SigningDeviceMsg {
-    Error(String),
+pub enum SigningDeviceMsg<Id = ()> {
+    /// Error with optional request Id (None for polling loop errors, Some for forwarding method errors).
+    Error(Option<Id>, String),
     /// Device map changed.
     Update,
-    XPub(Fingerprint, DerivationPath, Xpub),
-    Version(Fingerprint, Version),
+    XPub(Id, Fingerprint, DerivationPath, Xpub),
+    Version(Id, Fingerprint, Version),
     /// Wallet registered with name and optional HMAC.
-    WalletRegistered(Fingerprint, String, Option<[u8; 32]>),
+    WalletRegistered(Id, Fingerprint, String, Option<[u8; 32]>),
     /// Wallet registration check result.
-    WalletIsRegistered(Fingerprint, String, bool),
+    WalletIsRegistered(Id, Fingerprint, String, bool),
     /// Address displayed on device.
-    AddressDisplayed(Fingerprint, AddressScript),
+    AddressDisplayed(Id, Fingerprint, AddressScript),
     /// Transaction signed.
-    TransactionSigned(Fingerprint, Psbt),
+    TransactionSigned(Id, Fingerprint, Psbt),
 }
 
-pub struct HwiService<Message>
+pub struct HwiService<Message, Id = ()>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     network: Network,
     rt: tokio::runtime::Handle,
     /// Holds the runtime if we created it internally (keeps it alive).
     _owned_runtime: Option<tokio::runtime::Runtime>,
-    pub devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    pub devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     // Reference counting for multiple modal consumers
     ref_count: Arc<AtomicUsize>,
     shutdown: Arc<AtomicBool>,
@@ -397,9 +409,10 @@ where
     bitbox_noise_config: Arc<Mutex<Option<Arc<dyn NoiseConfig>>>>,
 }
 
-impl<Message> HwiService<Message>
+impl<Message, Id> HwiService<Message, Id>
 where
-    Message: From<SigningDeviceMsg> + Send + 'static + Clone,
+    Message: From<SigningDeviceMsg<Id>> + Send + 'static + Clone,
+    Id: Send + Clone + 'static,
 {
     pub fn new(network: Network, rt: Option<tokio::runtime::Handle>) -> Self {
         let (rt, owned_runtime) = if let Some(handle) = rt {
@@ -425,7 +438,7 @@ where
         }
     }
 
-    pub fn list(&self) -> BTreeMap<String, SigningDevice<Message>> {
+    pub fn list(&self) -> BTreeMap<String, SigningDevice<Message, Id>> {
         self.devices.lock().expect("poisoned").clone()
     }
 
@@ -550,9 +563,10 @@ where
     }
 }
 
-impl<Message> Drop for HwiService<Message>
+impl<Message, Id> Drop for HwiService<Message, Id>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     fn drop(&mut self) {
         if self._owned_runtime.is_some() {
@@ -567,15 +581,16 @@ where
 }
 
 #[cfg(feature = "bitbox")]
-async fn unlock_bitbox<Message>(
+async fn unlock_bitbox<Message, Id>(
     id: String,
     network: Network,
     bb: Box<PairingBitbox02<runtime::TokioRuntime>>,
     rt: tokio::runtime::Handle,
     sender: channel::Sender<Message>,
-) -> Result<SigningDevice<Message>, crate::Error>
+) -> Result<SigningDevice<Message, Id>, crate::Error>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     tracing::debug!("unlock_bitbox[{}]: waiting for pairing confirmation", id);
     let paired_bb = bb.wait_confirm().await?;
@@ -599,18 +614,20 @@ where
         version,
         rt,
         sender,
+        _phantom: PhantomData,
     }))
 }
 
-fn listen<Message>(
+fn listen<Message, Id>(
     sender: channel::Sender<Message>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     network: Network,
     rt: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
     #[cfg(feature = "bitbox")] bitbox_noise_config: Arc<Mutex<Option<Arc<dyn NoiseConfig>>>>,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     tracing::info!("HWI listener starting for network: {:?}", network);
 
@@ -621,7 +638,7 @@ fn listen<Message>(
         }
         Err(e) => {
             tracing::error!("Failed to initialize HID API: {}", e);
-            let _ = sender.send(SigningDeviceMsg::Error(e.to_string()).into());
+            let _ = sender.send(SigningDeviceMsg::Error(None, e.to_string()).into());
             return;
         }
     };
@@ -652,7 +669,7 @@ fn listen<Message>(
 
         if let Err(e) = hid.refresh_devices() {
             tracing::warn!("Failed to refresh HID devices: {}", e);
-            let _ = sender.send(SigningDeviceMsg::Error(e.to_string()).into());
+            let _ = sender.send(SigningDeviceMsg::Error(None, e.to_string()).into());
             continue;
         };
 
@@ -748,13 +765,14 @@ fn listen<Message>(
 }
 
 #[cfg(feature = "specter")]
-fn handle_specter_simulator<Message>(
+fn handle_specter_simulator<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: channel::Sender<Message>,
     handle: &mut Option<tokio::task::JoinHandle<()>>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     const SPECTER_SIMULATOR_ID: &str = "specter-simulator";
     // If device is already in the map, don't poll it again
@@ -829,13 +847,14 @@ fn handle_specter_simulator<Message>(
     }
 }
 
-fn should_poll<Message>(
+fn should_poll<Message, Id>(
     handles: &BTreeMap<String, JoinHandle<()>>,
-    devices: &Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: &Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     id: &str,
 ) -> bool
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     // If device is already in the map, don't poll it again
     if devices.lock().expect("poisoned").contains_key(id) {
@@ -864,14 +883,15 @@ where
     result
 }
 
-fn cleanup_disconnected<Message>(
+fn cleanup_disconnected<Message, Id>(
     sender: &channel::Sender<Message>,
     handles: &mut BTreeMap<String, JoinHandle<()>>,
-    devices: &Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: &Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     connected_ids: &[String],
     prefix: &str,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     tracing::trace!(
         "cleanup_disconnected: checking prefix '{}', connected_ids={:?}",
@@ -920,13 +940,14 @@ fn cleanup_disconnected<Message>(
 }
 
 #[cfg(feature = "specter")]
-fn handle_specter<Message>(
+fn handle_specter<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: channel::Sender<Message>,
     handles: &mut BTreeMap<String, tokio::task::JoinHandle<()>>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     fn specter_id(port: &str) -> String {
         let id = format!("specter-{port}");
@@ -1019,14 +1040,15 @@ fn handle_specter<Message>(
 }
 
 #[cfg(feature = "jade")]
-fn handle_jade<Message>(
+fn handle_jade<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: &channel::Sender<Message>,
     handles: &mut BTreeMap<String, tokio::task::JoinHandle<()>>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     network: Network,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     fn jade_id(port: &str) -> String {
         let id = format!("jade-{port}");
@@ -1143,7 +1165,7 @@ fn handle_jade<Message>(
 }
 
 #[cfg(feature = "jade")]
-async fn handle_jade_device<Message>(
+async fn handle_jade_device<Message, Id>(
     info: GetInfoResponse,
     network: Network,
     device: Jade<SerialTransport>,
@@ -1151,9 +1173,10 @@ async fn handle_jade_device<Message>(
     version: Option<Version>,
     rt: tokio::runtime::Handle,
     sender: channel::Sender<Message>,
-) -> Option<SigningDevice<Message>>
+) -> Option<SigningDevice<Message, Id>>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     tracing::debug!(
         "handle_jade_device[{}]: network={:?}, jade_networks={:?}, jade_state={:?}",
@@ -1242,6 +1265,7 @@ where
                     version,
                     rt,
                     sender,
+                    _phantom: PhantomData,
                 }))
             }
         }
@@ -1249,15 +1273,16 @@ where
 }
 
 #[cfg(feature = "jade")]
-async fn handle_locked_jade<Message>(
+async fn handle_locked_jade<Message, Id>(
     device: Jade<SerialTransport>,
     id: String,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     network: Network,
     rt: tokio::runtime::Handle,
     sender: channel::Sender<Message>,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     tracing::debug!("Attempting to unlock Jade device {}", id);
     if let Err(e) = device.auth().await {
@@ -1314,13 +1339,14 @@ async fn handle_locked_jade<Message>(
 }
 
 #[cfg(feature = "ledger")]
-fn handle_ledger_simulator<Message>(
+fn handle_ledger_simulator<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: channel::Sender<Message>,
     handle: &mut Option<tokio::task::JoinHandle<()>>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     const LEDGER_SIMULATOR_ID: &str = "ledger-simulator";
     // If device is already in the map, don't poll it again
@@ -1400,17 +1426,18 @@ fn handle_ledger_simulator<Message>(
 
 #[cfg(feature = "bitbox")]
 #[allow(clippy::too_many_arguments)]
-fn handle_bitbox02<Message>(
+fn handle_bitbox02<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: &channel::Sender<Message>,
     handles: &mut BTreeMap<String, tokio::task::JoinHandle<()>>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     list: Vec<&DeviceInfo>,
     hid: &HidApi,
     network: Network,
     #[cfg(feature = "bitbox")] bitbox_noise_config: Arc<Mutex<Option<Arc<dyn NoiseConfig>>>>,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     /// Prefer serial number for stable ID across USB ports; fall back to path.
     fn bitbox_id(device_info: &ledger::DeviceInfo) -> String {
@@ -1548,15 +1575,16 @@ fn handle_bitbox02<Message>(
 }
 
 #[cfg(feature = "bitbox")]
-async fn handle_locked_bitbox<Message>(
+async fn handle_locked_bitbox<Message, Id>(
     device: Box<PairingBitbox02<TokioRuntime>>,
     id: String,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     network: Network,
     rt: tokio::runtime::Handle,
     sender: channel::Sender<Message>,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     tracing::debug!("Waiting for BitBox02 {} pairing confirmation", id);
     match unlock_bitbox(id.clone(), network, device, rt, sender.clone()).await {
@@ -1583,15 +1611,16 @@ async fn handle_locked_bitbox<Message>(
 }
 
 #[cfg(feature = "coldcard")]
-fn handle_coldcard<Message>(
+fn handle_coldcard<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: &channel::Sender<Message>,
     handles: &mut BTreeMap<String, tokio::task::JoinHandle<()>>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     list: Vec<&DeviceInfo>,
     hid: &HidApi,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     fn coldcard_id(device_info: &ledger::DeviceInfo) -> String {
         let id = format!(
@@ -1673,6 +1702,7 @@ fn handle_coldcard<Message>(
                                         version: Some(version),
                                         rt: rt_,
                                         sender: sender.clone(),
+                                        _phantom: PhantomData,
                                     })
                                 } else {
                                     tracing::debug!("Coldcard {} has unsupported version {} (requires >= 6.2.1)",
@@ -1735,15 +1765,16 @@ fn handle_coldcard<Message>(
 }
 
 #[cfg(feature = "ledger")]
-fn handle_ledger<Message>(
+fn handle_ledger<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: &channel::Sender<Message>,
     handles: &mut BTreeMap<String, tokio::task::JoinHandle<()>>,
-    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message>>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     list: Vec<&DeviceInfo>,
     hid: &HidApi,
 ) where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     fn ledger_id(detected: &ledger::DeviceInfo) -> String {
         let id = format!(
@@ -1835,14 +1866,15 @@ fn handle_ledger<Message>(
 }
 
 #[cfg(feature = "ledger")]
-async fn handle_ledger_device<Message, T: crate::ledger::Transport + Sync + Send + 'static>(
+async fn handle_ledger_device<Message, Id, T: crate::ledger::Transport + Sync + Send + 'static>(
     id: String,
     device: ledger::Ledger<T>,
     rt: tokio::runtime::Handle,
     sender: channel::Sender<Message>,
-) -> Result<SigningDevice<Message>, HWIError>
+) -> Result<SigningDevice<Message, Id>, HWIError>
 where
-    Message: From<SigningDeviceMsg> + Send + Clone + 'static,
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
 {
     tracing::debug!(
         "handle_ledger_device[{}]: getting fingerprint and version",
@@ -1876,6 +1908,7 @@ where
                     version: Some(version),
                     rt,
                     sender,
+                    _phantom: PhantomData,
                 }))
             } else {
                 tracing::debug!(
