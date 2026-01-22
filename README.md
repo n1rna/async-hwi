@@ -50,3 +50,9 @@ A Empty case means the method is unimplemented on the client or device side.
 [^3]: https://github.com/Blockstream/Jade
 [^4]: https://github.com/LedgerHQ/app-bitcoin-new
 [^5]: https://github.com/cryptoadvance/specter-diy
+
+## Service Module
+
+The `service` module provides automatic device discovery and management with support
+for multiple concurrent consumers. See [SERVICE.md](SERVICE.md) for detailed
+documentation and usage examples.
