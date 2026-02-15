@@ -12,9 +12,13 @@ repository.workspace = true
 name = "hwi"
 path = "src/bin/hwi.rs"
 
+[features]
+trezor = ["async-hwi/trezor", "dep:trezor-client"]
+
 [dependencies]
 clap = { version = "4.4.7", features = ["derive"] }
 bitcoin = "0.32"
 hex = "0.4"
 async-hwi = { path = "../", version = "0.0.30" }
+trezor-client = { version = "0.1.5", default-features = false, features = ["bitcoin"], optional = true }
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync"] }

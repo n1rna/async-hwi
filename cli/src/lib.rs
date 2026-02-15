@@ -55,6 +55,17 @@ pub mod command {
             hws.push(device.into());
         }
 
+        // Trezor devices (uses rusb, must be before HidApi claims devices)
+        #[cfg(feature = "trezor")]
+        for available in trezor_client::find_devices(false) {
+            if let Ok(mut client) = available.connect() {
+                if client.init_device(None).is_ok() {
+                    let device = async_hwi::trezor::Trezor::new(client, network);
+                    hws.push(device.into());
+                }
+            }
+        }
+
         let api = Box::new(HidApi::new().unwrap());
 
         for device_info in api.device_list() {
