@@ -322,10 +322,14 @@ impl<T: 'static + Transport + Sync + Send> From<Jade<T>> for Box<dyn HWI + Send>
     }
 }
 
+const SHORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 async fn exchange<S, D>(
     transport: &mut SerialStream,
     method: &str,
     params: Option<S>,
+    timeout: std::time::Duration,
 ) -> Result<api::Response<D>, JadeError>
 where
     S: Serialize + Unpin,
@@ -343,7 +347,7 @@ where
 
     writer.write_all(&req).await.map_err(TransportError::from)?;
 
-    let response = read_stream(reader).await?;
+    let response = read_stream(reader, timeout).await?;
 
     if response.id != id.to_string() {
         return Err(TransportError::NonceMismatch.into());
@@ -354,10 +358,14 @@ where
 
 async fn read_stream<D: DeserializeOwned, S: AsyncRead + Unpin>(
     mut stream: S,
+    timeout: std::time::Duration,
 ) -> Result<api::Response<D>, TransportError> {
     let mut buf = Vec::<u8>::new();
     let mut chunk = [0; 1024];
-    let n = stream.read(&mut chunk).await?;
+    let n = tokio::time::timeout(timeout, stream.read(&mut chunk))
+        .await
+        .map_err(|_| TransportError::NoErrorOrResult)?
+        .map_err(TransportError::from)?;
     buf.extend_from_slice(&chunk[..n]);
     if let Ok(response) = serde_cbor::from_slice(&buf) {
         return Ok(response);
@@ -374,7 +382,7 @@ async fn read_stream<D: DeserializeOwned, S: AsyncRead + Unpin>(
                     return Ok(response);
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
                 break;
             }
         }
@@ -466,8 +474,13 @@ impl Transport for SerialTransport {
         method: &str,
         params: Option<S>,
     ) -> Result<api::Response<D>, JadeError> {
+        let timeout = match method {
+            "auth_user" | "pin" | "sign_psbt" | "get_extended_data"
+            | "register_descriptor" | "get_receive_address" => LONG_TIMEOUT,
+            _ => SHORT_TIMEOUT,
+        };
         let mut stream = self.stream.lock().await;
-        exchange(&mut stream, method, params).await
+        exchange(&mut stream, method, params, timeout).await
     }
 }
 
