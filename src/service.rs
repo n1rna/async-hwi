@@ -657,6 +657,8 @@ fn listen<Message, Id>(
     let mut coldcard_handles = BTreeMap::<String, JoinHandle<()>>::new();
     #[cfg(feature = "ledger")]
     let mut ledger_handles = BTreeMap::<String, JoinHandle<()>>::new();
+    #[cfg(feature = "trezor")]
+    let mut trezor_handles = BTreeMap::<String, JoinHandle<()>>::new();
 
     loop {
         // Check for shutdown signal
@@ -757,6 +759,27 @@ fn listen<Message, Id>(
             devices.clone(),
             ledger_devices,
             &hid,
+        );
+
+        #[cfg(feature = "trezor")]
+        let trezor_devices: Vec<_> = list
+            .iter()
+            .filter_map(|d| crate::trezor::is_trezor(d).then_some(*d))
+            .collect();
+        #[cfg(feature = "trezor")]
+        tracing::trace!(
+            "Filtered {} Trezor device(s) from HID list",
+            trezor_devices.len()
+        );
+
+        #[cfg(feature = "trezor")]
+        handle_trezor(
+            &rt,
+            &sender,
+            &mut trezor_handles,
+            devices.clone(),
+            trezor_devices,
+            network,
         );
 
         tracing::trace!("HWI poll cycle complete, sleeping for 2 seconds");
@@ -1964,6 +1987,165 @@ where
                 version: None,
                 reason: UnsupportedReason::AppIsNotOpen,
             })
+        }
+    }
+}
+
+#[cfg(feature = "trezor")]
+fn handle_trezor<Message, Id>(
+    rt: &tokio::runtime::Handle,
+    sender: &channel::Sender<Message>,
+    handles: &mut BTreeMap<String, tokio::task::JoinHandle<()>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
+    list: Vec<&DeviceInfo>,
+    network: Network,
+) where
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
+{
+    fn trezor_id(device_info: &DeviceInfo) -> String {
+        let id = format!(
+            "trezor-{:?}-{}-{}",
+            device_info.path(),
+            device_info.vendor_id(),
+            device_info.product_id()
+        );
+        id.replace("\"", "")
+    }
+
+    tracing::trace!("handle_trezor: processing {} device(s)", list.len());
+
+    if !list.is_empty() {
+        tracing::debug!("Found {} potential Trezor device(s)", list.len());
+    }
+
+    let connected_ids: Vec<_> = list.iter().map(|d| trezor_id(d)).collect();
+    tracing::trace!("handle_trezor: connected_ids={:?}", connected_ids);
+    cleanup_disconnected(sender, handles, &devices, &connected_ids, "trezor-");
+
+    for device_info in list {
+        if crate::trezor::is_trezor(device_info) {
+            let id = trezor_id(device_info);
+            tracing::trace!(
+                "handle_trezor: checking device {} (vid={}, pid={})",
+                id,
+                device_info.vendor_id(),
+                device_info.product_id()
+            );
+            if !should_poll(handles, &devices, &id) {
+                tracing::debug!("handle_trezor: skipping {} (should_poll=false)", id);
+                continue;
+            }
+
+            tracing::trace!("handle_trezor: spawning async task for device {}", id);
+            let devices = devices.clone();
+            let id_clone = id.clone();
+            let sender = sender.clone();
+            let rt_ = rt.clone();
+            let jh = rt.spawn(async move {
+                tracing::debug!("Connecting to Trezor device {}", id_clone);
+                // Use trezor_client::find_devices to connect (it uses rusb, not hidapi).
+                let mut available = trezor_client::find_devices(false);
+                if let Some(dev) = available.pop() {
+                    match dev.connect() {
+                        Ok(mut client) => {
+                            tracing::debug!("handle_trezor[{}]: initializing device", id_clone);
+                            if let Err(e) = client.init_device(None) {
+                                tracing::error!(
+                                    "Failed to initialize Trezor {}: {}",
+                                    id_clone,
+                                    e
+                                );
+                                return;
+                            }
+                            let device: Arc<dyn HWI + Send + Sync> = Arc::new(
+                                crate::trezor::Trezor::new(client, network),
+                            );
+                            tracing::debug!(
+                                "handle_trezor[{}]: getting fingerprint and version",
+                                id_clone
+                            );
+                            match (
+                                device.get_master_fingerprint().await,
+                                device.get_version().await,
+                            ) {
+                                (Ok(fingerprint), Ok(version)) => {
+                                    tracing::debug!(
+                                        "Trezor {} detected (version: {}, fingerprint: {})",
+                                        id_clone,
+                                        version,
+                                        fingerprint
+                                    );
+                                    let hw =
+                                        SigningDevice::Supported(SupportedDevice {
+                                            id: id_clone.clone(),
+                                            device,
+                                            kind: DeviceKind::Trezor,
+                                            fingerprint,
+                                            version: Some(version),
+                                            rt: rt_,
+                                            sender: sender.clone(),
+                                            _phantom: PhantomData,
+                                        });
+                                    tracing::debug!(
+                                        "handle_trezor[{}]: inserting device into map",
+                                        id_clone
+                                    );
+                                    devices.lock().expect("poisoned").insert(id_clone, hw);
+                                    let _ = sender.send(SigningDeviceMsg::Update.into());
+                                }
+                                (Err(e1), Err(e2)) => {
+                                    tracing::error!(
+                                        "Failed to connect to Trezor {}",
+                                        id_clone
+                                    );
+                                    tracing::debug!(
+                                        "handle_trezor[{}]: fingerprint error={}, version error={}",
+                                        id_clone,
+                                        e1,
+                                        e2
+                                    );
+                                }
+                                (Err(e), _) => {
+                                    tracing::error!(
+                                        "Failed to connect to Trezor {}",
+                                        id_clone
+                                    );
+                                    tracing::debug!(
+                                        "handle_trezor[{}]: fingerprint error={}",
+                                        id_clone,
+                                        e
+                                    );
+                                }
+                                (_, Err(e)) => {
+                                    tracing::error!(
+                                        "Failed to connect to Trezor {}",
+                                        id_clone
+                                    );
+                                    tracing::debug!(
+                                        "handle_trezor[{}]: version error={}",
+                                        id_clone,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "handle_trezor: failed to connect to Trezor {}: {}",
+                                id_clone,
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    tracing::trace!(
+                        "handle_trezor: no Trezor devices found via trezor_client for {}",
+                        id_clone
+                    );
+                }
+            });
+            handles.insert(id, jh);
         }
     }
 }
