@@ -143,6 +143,7 @@ dependencies = [
  "ledger-apdu",
  "ledger-transport-hidapi",
  "ledger_bitcoin_client",
+ "protobuf",
  "regex",
  "reqwest",
  "serde",

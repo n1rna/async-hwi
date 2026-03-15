@@ -11,9 +11,9 @@ pub mod ledger;
 pub mod service;
 #[cfg(feature = "specter")]
 pub mod specter;
+pub mod utils;
 #[cfg(feature = "trezor")]
 pub mod trezor;
-pub mod utils;
 
 use async_trait::async_trait;
 use bitcoin::{
