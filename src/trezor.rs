@@ -104,21 +104,29 @@ fn ack_input(
         data_input.set_amount(txout.value.to_sat());
 
         if script_pubkey.is_p2tr() {
+            // Try keypath first (internal key with no leaf hashes)
             let keypath = if let Some(ref internal_key) = psbt_input.tap_internal_key {
                 psbt_input
                     .tap_key_origins
                     .get(internal_key)
-                    .map(|(_, (_, path))| path)
-            } else if psbt_input.tap_key_origins.len() == 1 {
-                psbt_input
-                    .tap_key_origins
-                    .values()
-                    .next()
+                    .filter(|(leaf_hashes, _)| leaf_hashes.is_empty())
                     .map(|(_, (_, path))| path)
             } else {
                 None
             };
-            if let Some(path) = keypath {
+
+            // If no keypath match, try script path (key with leaf hashes)
+            let script_path = if keypath.is_none() {
+                psbt_input
+                    .tap_key_origins
+                    .iter()
+                    .find(|(_, (leaf_hashes, _))| !leaf_hashes.is_empty())
+                    .map(|(_, (_, (_, path)))| path)
+            } else {
+                None
+            };
+
+            if let Some(path) = keypath.or(script_path) {
                 data_input.address_n =
                     path.as_ref().iter().map(|i| u32::from(*i)).collect();
                 data_input.set_script_type(InputScriptType::SPENDTAPROOT);
@@ -283,8 +291,31 @@ fn apply_signature(psbt: &mut Psbt, index: usize, sig_bytes: &[u8]) -> Result<()
         .unwrap_or(false);
 
     if is_taproot {
-        if let Ok(sig) = bitcoin::taproot::Signature::from_slice(sig_bytes) {
+        let sig = bitcoin::taproot::Signature::from_slice(sig_bytes)
+            .map_err(|e| TrezorError::Device(format!("Invalid Schnorr signature: {}", e)))?;
+
+        // Determine if this is a keypath or script-path signature.
+        // Keypath: internal key exists and has no leaf hashes in tap_key_origins
+        let is_keypath = input.tap_internal_key.as_ref().is_some_and(|ik| {
+            input
+                .tap_key_origins
+                .get(ik)
+                .map(|(leaf_hashes, _)| leaf_hashes.is_empty())
+                .unwrap_or(false)
+        });
+
+        if is_keypath {
             input.tap_key_sig = Some(sig);
+        } else {
+            // Script path: find the key that has leaf hashes and insert tap_script_sig
+            for (xonly_pk, (leaf_hashes, _)) in &input.tap_key_origins {
+                if !leaf_hashes.is_empty() {
+                    for leaf_hash in leaf_hashes {
+                        input.tap_script_sigs.insert((*xonly_pk, *leaf_hash), sig);
+                    }
+                    break;
+                }
+            }
         }
     } else {
         let pubkey = input.bip32_derivation.keys().next().copied();
