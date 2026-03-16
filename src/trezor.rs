@@ -104,29 +104,27 @@ fn ack_input(
         data_input.set_amount(txout.value.to_sat());
 
         if script_pubkey.is_p2tr() {
-            // Try keypath first (internal key with no leaf hashes)
-            let keypath = if let Some(ref internal_key) = psbt_input.tap_internal_key {
-                psbt_input
-                    .tap_key_origins
-                    .get(internal_key)
-                    .filter(|(leaf_hashes, _)| leaf_hashes.is_empty())
-                    .map(|(_, (_, path))| path)
+            // Try script path first (key with leaf hashes) — more specific
+            let script_path = psbt_input
+                .tap_key_origins
+                .iter()
+                .find(|(_, (leaf_hashes, _))| !leaf_hashes.is_empty())
+                .map(|(_, (_, (_, path)))| path);
+
+            // Fall back to keypath (internal key with no leaf hashes)
+            let keypath = if script_path.is_none() {
+                psbt_input.tap_internal_key.as_ref().and_then(|ik| {
+                    psbt_input
+                        .tap_key_origins
+                        .get(ik)
+                        .filter(|(leaf_hashes, _)| leaf_hashes.is_empty())
+                        .map(|(_, (_, path))| path)
+                })
             } else {
                 None
             };
 
-            // If no keypath match, try script path (key with leaf hashes)
-            let script_path = if keypath.is_none() {
-                psbt_input
-                    .tap_key_origins
-                    .iter()
-                    .find(|(_, (leaf_hashes, _))| !leaf_hashes.is_empty())
-                    .map(|(_, (_, (_, path)))| path)
-            } else {
-                None
-            };
-
-            if let Some(path) = keypath.or(script_path) {
+            if let Some(path) = script_path.or(keypath) {
                 data_input.address_n =
                     path.as_ref().iter().map(|i| u32::from(*i)).collect();
                 data_input.set_script_type(InputScriptType::SPENDTAPROOT);
@@ -282,7 +280,12 @@ fn ack_meta(req: &protos::TxRequest, psbt: &Psbt) -> Result<protos::TxAck, Trezo
     Ok(msg)
 }
 
-fn apply_signature(psbt: &mut Psbt, index: usize, sig_bytes: &[u8]) -> Result<(), TrezorError> {
+fn apply_signature(
+    psbt: &mut Psbt,
+    index: usize,
+    sig_bytes: &[u8],
+    keypath_inputs: &std::collections::HashSet<usize>,
+) -> Result<(), TrezorError> {
     let input = psbt.inputs.get_mut(index).ok_or(TrezorError::InvalidIndex(index))?;
     let is_taproot = input
         .witness_utxo
@@ -294,20 +297,9 @@ fn apply_signature(psbt: &mut Psbt, index: usize, sig_bytes: &[u8]) -> Result<()
         let sig = bitcoin::taproot::Signature::from_slice(sig_bytes)
             .map_err(|e| TrezorError::Device(format!("Invalid Schnorr signature: {}", e)))?;
 
-        // Determine if this is a keypath or script-path signature.
-        // Keypath: internal key exists and has no leaf hashes in tap_key_origins
-        let is_keypath = input.tap_internal_key.as_ref().is_some_and(|ik| {
-            input
-                .tap_key_origins
-                .get(ik)
-                .map(|(leaf_hashes, _)| leaf_hashes.is_empty())
-                .unwrap_or(false)
-        });
-
-        if is_keypath {
+        if keypath_inputs.contains(&index) {
             input.tap_key_sig = Some(sig);
         } else {
-            // Script path: find the key that has leaf hashes and insert tap_script_sig
             for (xonly_pk, (leaf_hashes, _)) in &input.tap_key_origins {
                 if !leaf_hashes.is_empty() {
                     for leaf_hash in leaf_hashes {
@@ -331,6 +323,27 @@ fn apply_signature(psbt: &mut Psbt, index: usize, sig_bytes: &[u8]) -> Result<()
 fn sign_psbt(client: &mut TrezorClient, psbt: &mut Psbt, network: Network) -> Result<(), TrezorError> {
     use trezor_client::protos::tx_request::RequestType as TxRequestType;
 
+    // Pre-compute which inputs use keypath vs script-path signing.
+    // Mirrors ack_input: script-path first, keypath fallback.
+    let mut keypath_inputs = std::collections::HashSet::new();
+    for (i, psbt_input) in psbt.inputs.iter().enumerate() {
+        let is_p2tr = psbt_input
+            .witness_utxo
+            .as_ref()
+            .map(|o| o.script_pubkey.is_p2tr())
+            .unwrap_or(false);
+        if !is_p2tr {
+            continue;
+        }
+        let has_script_path = psbt_input
+            .tap_key_origins
+            .iter()
+            .any(|(_, (leaf_hashes, _))| !leaf_hashes.is_empty());
+        if !has_script_path {
+            keypath_inputs.insert(i);
+        }
+    }
+
     let mut progress = handle_interaction(
         client
             .sign_tx(psbt, network)
@@ -340,7 +353,7 @@ fn sign_psbt(client: &mut TrezorClient, psbt: &mut Psbt, network: Network) -> Re
 
     loop {
         if let Some((index, sig_bytes)) = progress.get_signature() {
-            apply_signature(psbt, index, sig_bytes.to_vec().as_slice())?;
+            apply_signature(psbt, index, sig_bytes.to_vec().as_slice(), &keypath_inputs)?;
         }
 
         if progress.finished() {
