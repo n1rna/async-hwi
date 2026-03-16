@@ -101,6 +101,8 @@ fn ack_input(
 
         let script_pubkey = &txout.script_pubkey;
 
+        data_input.set_amount(txout.value.to_sat());
+
         if script_pubkey.is_p2tr() {
             let keypath = if let Some(ref internal_key) = psbt_input.tap_internal_key {
                 psbt_input
