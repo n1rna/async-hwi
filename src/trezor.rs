@@ -414,9 +414,12 @@ impl HWI for Trezor {
 
     async fn get_extended_pubkey(&self, path: &DerivationPath) -> Result<Xpub, HWIError> {
         let mut client = self.client.lock().map_err(|_| HWIError::DeviceDisconnected)?;
-        let script_type = script_type_for_path(path);
+        // Use SPENDADDRESS to get standard xpub/tpub version bytes.
+        // Script-type-specific types (SPENDWITNESS, etc.) cause Trezor to
+        // return SLIP-0132 encoded keys (zpub/vpub/ypub/upub) which the
+        // bitcoin crate's Xpub parser does not recognize.
         let resp = client
-            .get_public_key(path, script_type, self.network, false)
+            .get_public_key(path, InputScriptType::SPENDADDRESS, self.network, false)
             .map_err(|e| HWIError::Device(e.to_string()))?;
         handle_interaction(resp).map_err(|e| HWIError::Device(e.to_string()))
     }

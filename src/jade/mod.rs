@@ -325,8 +325,8 @@ impl<T: 'static + Transport + Sync + Send> From<Jade<T>> for Box<dyn HWI + Send>
 const SHORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-async fn exchange<S, D>(
-    transport: &mut SerialStream,
+async fn exchange<S, D, T>(
+    transport: &mut T,
     method: &str,
     params: Option<S>,
     timeout: std::time::Duration,
@@ -334,6 +334,7 @@ async fn exchange<S, D>(
 where
     S: Serialize + Unpin,
     D: DeserializeOwned + Unpin,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (reader, mut writer) = tokio::io::split(transport);
 
@@ -480,7 +481,61 @@ impl Transport for SerialTransport {
             _ => SHORT_TIMEOUT,
         };
         let mut stream = self.stream.lock().await;
-        exchange(&mut stream, method, params, timeout).await
+        exchange(&mut *stream, method, params, timeout).await
+    }
+}
+
+/// TCP transport for connecting to the Jade QEMU emulator.
+#[derive(Debug)]
+pub struct TcpTransport {
+    pub stream: Arc<Mutex<tokio::net::TcpStream>>,
+}
+
+pub const DEFAULT_JADE_EMULATOR_PORT: u16 = 30121;
+
+impl TcpTransport {
+    pub async fn new(addr: &str) -> Result<Self, TransportError> {
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(TransportError::from)?;
+        Ok(Self {
+            stream: Arc::new(Mutex::new(stream)),
+        })
+    }
+}
+
+#[async_trait]
+impl Transport for TcpTransport {
+    async fn request<S: Serialize + Send + Unpin, D: DeserializeOwned + Unpin + Send>(
+        &self,
+        method: &str,
+        params: Option<S>,
+    ) -> Result<api::Response<D>, JadeError> {
+        let timeout = match method {
+            "auth_user" | "pin" | "sign_psbt" | "get_extended_data"
+            | "register_descriptor" | "get_receive_address" => LONG_TIMEOUT,
+            _ => SHORT_TIMEOUT,
+        };
+        let mut stream = self.stream.lock().await;
+        exchange(&mut *stream, method, params, timeout).await
+    }
+}
+
+/// Type alias for the Jade QEMU emulator accessed via TCP.
+pub type JadeEmulator = Jade<TcpTransport>;
+
+impl JadeEmulator {
+    /// Connect to a Jade QEMU emulator at the given address.
+    /// Default address: `127.0.0.1:30121`.
+    pub async fn try_connect() -> Result<Self, HWIError> {
+        let addr = format!("127.0.0.1:{}", DEFAULT_JADE_EMULATOR_PORT);
+        let transport = TcpTransport::new(&addr)
+            .await
+            .map_err(|e| HWIError::Device(e.to_string()))?;
+        let jade = Jade::<TcpTransport>::new(transport);
+        // Verify connectivity with a ping
+        jade.ping().await.map_err(|e| HWIError::Device(e.to_string()))?;
+        Ok(jade)
     }
 }
 
