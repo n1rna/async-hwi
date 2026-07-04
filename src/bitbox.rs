@@ -88,6 +88,55 @@ impl<T: Runtime> PairingBitbox02WithLocalCache<T> {
                 .expect("noise config data must be in local cache"),
         ))
     }
+
+    /// Open, pair, and confirm a BitBox02 in a single call, with no gap
+    /// between `unlock_and_pair` and `wait_confirm`.
+    ///
+    /// The usual two-step flow (`connect` at discovery, `wait_confirm` on a
+    /// later user action) leaves an arbitrary delay between the noise
+    /// handshake and the pairing-verification request. A physical BitBox02
+    /// tolerates this — it blocks on the pairing screen until the user
+    /// presses confirm — but the BitBox02 *simulator* auto-confirms and
+    /// closes its verification window almost immediately, so a delayed
+    /// `wait_confirm` sends `OP_I_CAN_HAS_PAIRIN_VERIFICASHUN` after the
+    /// device has left that state and fails with `BitBoxError::InvalidState`
+    /// ("can't call this endpoint: wrong state").
+    ///
+    /// This method keeps the two steps back to back. The pairing code (if
+    /// any) is surfaced through `on_pairing_code` right before confirmation
+    /// so the caller can still display it for the user's man-in-the-middle
+    /// check; the callback must not block (that would reintroduce the gap).
+    /// On real hardware `wait_confirm` still blocks on the device button, so
+    /// the UX is unchanged.
+    pub async fn connect_and_confirm<F>(
+        device: hidapi::HidDevice,
+        pairing_data: Option<NoiseConfigData>,
+        on_pairing_code: F,
+    ) -> Result<(PairedBitBox<T>, NoiseConfigData), HWIError>
+    where
+        F: FnOnce(Option<String>) + Send,
+    {
+        let local_cache = if let Some(data) = pairing_data {
+            Cache(Arc::new(Mutex::new(Some(data))))
+        } else {
+            Cache(Arc::new(Mutex::new(None)))
+        };
+        let bitbox =
+            bitbox_api::BitBox::<T>::from_hid_device(device, Box::new(local_cache.clone())).await?;
+        let pairing = bitbox.unlock_and_pair().await?;
+        on_pairing_code(pairing.get_pairing_code());
+        let client = pairing.wait_confirm().await?;
+        let data = {
+            let mut cache = local_cache
+                .0
+                .lock()
+                .map_err(|e| HWIError::Device(e.to_string()))?;
+            cache
+                .take()
+                .expect("noise config data must be in local cache")
+        };
+        Ok((client, data))
+    }
 }
 
 pub struct PairingBitbox02<T: Runtime> {
